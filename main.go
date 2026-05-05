@@ -1,15 +1,23 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"sync/atomic"
+
+	_ "github.com/google/uuid"
+	"github.com/gregcozza-ai/Chirpy/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+    dbQueries *database.Queries
 }
 
 type ChirpRequest struct {
@@ -83,7 +91,15 @@ func (cfg *apiConfig) handleValidateChirp(w http.ResponseWriter, r *http.Request
 }
 
 func main() {
-	apiCfg := apiConfig{}
+    godotenv.Load()
+    dbURL := os.Getenv("DB_URL")
+    db, err := sql.Open("postgres", dbURL)
+    if err != nil {
+        panic(err)
+    }
+    dbQueries := database.New(db)
+
+	apiCfg := apiConfig{dbQueries: dbQueries}
 
 	mux := http.NewServeMux()
 
