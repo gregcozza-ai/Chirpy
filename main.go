@@ -22,7 +22,15 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	fmt.Fprintf(w, "Hits: %d", cfg.fileserverHits.Load())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	html := fmt.Sprintf(`
+        <html>
+          <body>
+            <h1>Welcome, Chirpy Admin</h1>
+            <p>Chirpy has been visited %d times!</p>
+          </body>
+        </html>`, cfg.fileserverHits.Load())
+	w.Write([]byte(html))
 }
 
 func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
@@ -53,11 +61,11 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	// Metrics endpoint - only GET
-	mux.HandleFunc("/api/metrics", apiCfg.handleMetrics)
+	// Metrics endpoint - only GET (now /admin/metrics)
+	mux.HandleFunc("/admin/metrics", apiCfg.handleMetrics)
 
-	// Reset endpoint - only POST
-	mux.HandleFunc("/api/reset", apiCfg.handleReset)
+	// Reset endpoint - only POST (now /admin/reset)
+	mux.HandleFunc("/admin/reset", apiCfg.handleReset)
 
 	server := &http.Server{
 		Addr:    ":8080",
