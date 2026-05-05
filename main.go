@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sync/atomic"
 )
 
@@ -13,6 +14,11 @@ type apiConfig struct {
 
 type ChirpRequest struct {
 	Body string `json:"body"`
+}
+
+func replaceProfanity(s string) string {
+	profaneRegex := regexp.MustCompile(`(?i)\b(kerfuffle|sharbert|fornax)\b`)
+	return profaneRegex.ReplaceAllString(s, "****")
 }
 
 func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -72,7 +78,8 @@ func (cfg *apiConfig) handleValidateChirp(w http.ResponseWriter, r *http.Request
 		cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
-	cfg.respondWithJSON(w, http.StatusOK, map[string]bool{"valid": true})
+	cleanedBody := replaceProfanity(req.Body)
+	cfg.respondWithJSON(w, http.StatusOK, map[string]string{"cleaned_body": cleanedBody})
 }
 
 func main() {
