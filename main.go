@@ -43,7 +43,7 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fileServer))
 
 	// Health endpoint - only GET
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -54,10 +54,10 @@ func main() {
 	})
 
 	// Metrics endpoint - only GET
-	mux.HandleFunc("/metrics", apiCfg.handleMetrics)
+	mux.HandleFunc("/api/metrics", apiCfg.handleMetrics)
 
 	// Reset endpoint - only POST
-	mux.HandleFunc("/reset", apiCfg.handleReset)
+	mux.HandleFunc("/api/reset", apiCfg.handleReset)
 
 	server := &http.Server{
 		Addr:    ":8080",
