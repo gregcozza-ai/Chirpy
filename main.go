@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -8,8 +9,9 @@ import (
 	"os"
 	"regexp"
 	"sync/atomic"
+	"time"
 
-	_ "github.com/google/uuid"
+	"github.com/google/uuid"
 	"github.com/gregcozza-ai/Chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -17,11 +19,23 @@ import (
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
-    dbQueries *database.Queries
+	dbQueries      *database.Queries
+	platform       string
 }
 
-type ChirpRequest struct {
-	Body string `json:"body"`
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 func replaceProfanity(s string) string {
@@ -66,40 +80,127 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+
+	// Only allow in dev environment
+	if cfg.platform != "dev" {
+		cfg.respondWithError(w, http.StatusForbidden, "Only allowed in dev environment")
+		return
+	}
+
+	// Delete all users
+	if err := cfg.dbQueries.DeleteAllUsers(context.Background()); err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to delete users")
+		return
+	}
+
+	// Reset metrics counter
 	cfg.fileserverHits.Store(0)
 }
 
-func (cfg *apiConfig) handleValidateChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	var req ChirpRequest
+
+	var req struct {
+		Body   string `json:"body"`
+		UserID string `json:"user_id"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
+
+	// Validate body length
 	if len(req.Body) > 140 {
 		cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
+
+	// Replace profanity
 	cleanedBody := replaceProfanity(req.Body)
-	cfg.respondWithJSON(w, http.StatusOK, map[string]string{"cleaned_body": cleanedBody})
+
+	// Convert user_id string to UUID
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid user_id format")
+		return
+	}
+
+	// Create chirp in database
+	dbChirp, err := cfg.dbQueries.CreateChirp(context.Background(), database.CreateChirpParams{
+		Body:   cleanedBody,
+		UserID: userID,
+	})
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create chirp")
+		return
+	}
+
+	// Return 201 Created with full chirp
+	chirp := Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+	cfg.respondWithJSON(w, http.StatusCreated, chirp)
+}
+
+func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	// Create user in database
+	dbUser, err := cfg.dbQueries.CreateUser(context.Background(), req.Email)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create user")
+		return
+	}
+
+	// Convert to main.User struct
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+
+	// Return 201 Created
+	cfg.respondWithJSON(w, http.StatusCreated, user)
 }
 
 func main() {
-    godotenv.Load()
-    dbURL := os.Getenv("DB_URL")
-    db, err := sql.Open("postgres", dbURL)
-    if err != nil {
-        panic(err)
-    }
-    dbQueries := database.New(db)
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
 
-	apiCfg := apiConfig{dbQueries: dbQueries}
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		panic(err)
+	}
+
+	dbQueries := database.New(db)
+
+	apiCfg := apiConfig{
+		dbQueries: dbQueries,
+		platform:  platform,
+	}
 
 	mux := http.NewServeMux()
 
@@ -124,8 +225,11 @@ func main() {
 	// Reset endpoint - only POST (now /admin/reset)
 	mux.HandleFunc("/admin/reset", apiCfg.handleReset)
 
-	// New validation endpoint
-	mux.HandleFunc("/api/validate_chirp", apiCfg.handleValidateChirp)
+	// New user creation endpoint
+	mux.HandleFunc("/api/users", apiCfg.handleCreateUser)
+
+	// New chirp creation endpoint (replaces /api/validate_chirp)
+	mux.HandleFunc("/api/chirps", apiCfg.handleChirps)
 
 	server := &http.Server{
 		Addr:    ":8080",
