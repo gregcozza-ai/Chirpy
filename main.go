@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -8,6 +9,22 @@ import (
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+}
+
+type ChirpRequest struct {
+	Body string `json:"body"`
+}
+
+func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg string) {
+	w.WriteHeader(code)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.WriteHeader(code)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payload)
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -41,6 +58,23 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 }
 
+func (cfg *apiConfig) handleValidateChirp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	var req ChirpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if len(req.Body) > 140 {
+		cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+	cfg.respondWithJSON(w, http.StatusOK, map[string]bool{"valid": true})
+}
+
 func main() {
 	apiCfg := apiConfig{}
 
@@ -66,6 +100,9 @@ func main() {
 
 	// Reset endpoint - only POST (now /admin/reset)
 	mux.HandleFunc("/admin/reset", apiCfg.handleReset)
+
+	// New validation endpoint
+	mux.HandleFunc("/api/validate_chirp", apiCfg.handleValidateChirp)
 
 	server := &http.Server{
 		Addr:    ":8080",
