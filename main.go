@@ -177,6 +177,37 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (cfg *apiConfig) handleChirpByID(w http.ResponseWriter, r *http.Request) {
+	// Extract chirp ID from path parameter
+	chirpID := r.PathValue("chirpID")
+
+	// Validate and parse UUID
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid chirp ID format")
+		return
+	}
+
+	// Fetch chirp from database
+	dbChirp, err := cfg.dbQueries.GetChirpByID(context.Background(), id)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusNotFound, "Chirp not found")
+		return
+	}
+
+	// Convert to response format
+	chirp := Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+
+	// Return 200 OK with chirp data
+	cfg.respondWithJSON(w, http.StatusOK, chirp)
+}
+
 func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -255,6 +286,9 @@ func main() {
 
 	// New chirp creation endpoint (replaces /api/validate_chirp)
 	mux.HandleFunc("/api/chirps", apiCfg.handleChirps)
+
+	// New endpoint for single chirp by ID
+	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.handleChirpByID)
 
 	server := &http.Server{
 		Addr:    ":8080",
