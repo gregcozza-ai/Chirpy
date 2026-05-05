@@ -101,55 +101,80 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	switch r.Method {
+	case "POST":
+		// Existing POST logic (unchanged from previous implementation)
+		var req struct {
+			Body   string `json:"body"`
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+
+		// Validate body length
+		if len(req.Body) > 140 {
+			cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+			return
+		}
+
+		// Replace profanity
+		cleanedBody := replaceProfanity(req.Body)
+
+		// Convert user_id string to UUID
+		userID, err := uuid.Parse(req.UserID)
+		if err != nil {
+			cfg.respondWithError(w, http.StatusBadRequest, "Invalid user_id format")
+			return
+		}
+
+		// Create chirp in database
+		dbChirp, err := cfg.dbQueries.CreateChirp(context.Background(), database.CreateChirpParams{
+			Body:   cleanedBody,
+			UserID: userID,
+		})
+		if err != nil {
+			cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create chirp")
+			return
+		}
+
+		// Return 201 Created with full chirp
+		chirp := Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		}
+		cfg.respondWithJSON(w, http.StatusCreated, chirp)
+
+	case "GET":
+		// New GET logic for retrieving all chirps
+		dbChirps, err := cfg.dbQueries.GetChirps(context.Background())
+		if err != nil {
+			cfg.respondWithError(w, http.StatusInternalServerError, "Failed to fetch chirps")
+			return
+		}
+
+		// Convert to Chirp array
+		chirps := make([]Chirp, len(dbChirps))
+		for i, dbChirp := range dbChirps {
+			chirps[i] = Chirp{
+				ID:        dbChirp.ID,
+				CreatedAt: dbChirp.CreatedAt,
+				UpdatedAt: dbChirp.UpdatedAt,
+				Body:      dbChirp.Body,
+				UserID:    dbChirp.UserID,
+			}
+		}
+
+		// Return 200 OK with chirps array
+		cfg.respondWithJSON(w, http.StatusOK, chirps)
+
+	default:
 		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
 	}
-
-	var req struct {
-		Body   string `json:"body"`
-		UserID string `json:"user_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
-		return
-	}
-
-	// Validate body length
-	if len(req.Body) > 140 {
-		cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-		return
-	}
-
-	// Replace profanity
-	cleanedBody := replaceProfanity(req.Body)
-
-	// Convert user_id string to UUID
-	userID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		cfg.respondWithError(w, http.StatusBadRequest, "Invalid user_id format")
-		return
-	}
-
-	// Create chirp in database
-	dbChirp, err := cfg.dbQueries.CreateChirp(context.Background(), database.CreateChirpParams{
-		Body:   cleanedBody,
-		UserID: userID,
-	})
-	if err != nil {
-		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create chirp")
-		return
-	}
-
-	// Return 201 Created with full chirp
-	chirp := Chirp{
-		ID:        dbChirp.ID,
-		CreatedAt: dbChirp.CreatedAt,
-		UpdatedAt: dbChirp.UpdatedAt,
-		Body:      dbChirp.Body,
-		UserID:    dbChirp.UserID,
-	}
-	cfg.respondWithJSON(w, http.StatusCreated, chirp)
 }
 
 func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
