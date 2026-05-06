@@ -12,14 +12,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gregcozza-ai/Chirpy/internal/auth"
 	"github.com/gregcozza-ai/Chirpy/internal/database"
 	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+    _ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	db             *sql.DB
 	platform       string
 }
 
@@ -64,7 +66,7 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -103,7 +105,6 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
-		// Existing POST logic (unchanged from previous implementation)
 		var req struct {
 			Body   string `json:"body"`
 			UserID string `json:"user_id"`
@@ -121,6 +122,9 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 
 		// Replace profanity
 		cleanedBody := replaceProfanity(req.Body)
+
+		// Generate UUID before inserting
+		//id := uuid.New()
 
 		// Convert user_id string to UUID
 		userID, err := uuid.Parse(req.UserID)
@@ -150,7 +154,6 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithJSON(w, http.StatusCreated, chirp)
 
 	case "GET":
-		// New GET logic for retrieving all chirps
 		dbChirps, err := cfg.dbQueries.GetChirps(context.Background())
 		if err != nil {
 			cfg.respondWithError(w, http.StatusInternalServerError, "Failed to fetch chirps")
@@ -178,24 +181,19 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleChirpByID(w http.ResponseWriter, r *http.Request) {
-	// Extract chirp ID from path parameter
 	chirpID := r.PathValue("chirpID")
-
-	// Validate and parse UUID
 	id, err := uuid.Parse(chirpID)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusBadRequest, "Invalid chirp ID format")
 		return
 	}
 
-	// Fetch chirp from database
 	dbChirp, err := cfg.dbQueries.GetChirpByID(context.Background(), id)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusNotFound, "Chirp not found")
 		return
 	}
 
-	// Convert to response format
 	chirp := Chirp{
 		ID:        dbChirp.ID,
 		CreatedAt: dbChirp.CreatedAt,
@@ -204,7 +202,6 @@ func (cfg *apiConfig) handleChirpByID(w http.ResponseWriter, r *http.Request) {
 		UserID:    dbChirp.UserID,
 	}
 
-	// Return 200 OK with chirp data
 	cfg.respondWithJSON(w, http.StatusOK, chirp)
 }
 
@@ -215,21 +212,72 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Email string `json:"email"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	// Create user in database
-	dbUser, err := cfg.dbQueries.CreateUser(context.Background(), req.Email)
+	// Hash password
+	hashedPassword, err := auth.HashPassword(req.Password)
 	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+		return
+	}
+        
+	// Generate UUID before inserting
+	id := uuid.New()
+
+	// Create user in database
+	user := User{}
+	if err := cfg.db.QueryRowContext(context.Background(),
+		`INSERT INTO users (id, email, hashed_password) VALUES ($1, $2, $3)
+		 RETURNING id, created_at, updated_at, email`,
+		id,
+		req.Email,
+		hashedPassword,
+	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt, &user.Email); err != nil {
+		fmt.Printf("Database error: %v\n", err)
 		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create user")
 		return
 	}
 
-	// Convert to main.User struct
+	// Return 201 Created
+	cfg.respondWithJSON(w, http.StatusCreated, user)
+}
+
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	// Get user by email
+	dbUser, err := cfg.dbQueries.GetUserByEmail(context.Background(), req.Email)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	// Verify password
+	match, err := auth.CheckPasswordHash(req.Password, dbUser.HashedPassword)
+	if err != nil || !match {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	// Return user without password
 	user := User{
 		ID:        dbUser.ID,
 		CreatedAt: dbUser.CreatedAt,
@@ -237,8 +285,7 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Email:     dbUser.Email,
 	}
 
-	// Return 201 Created
-	cfg.respondWithJSON(w, http.StatusCreated, user)
+	cfg.respondWithJSON(w, http.StatusOK, user)
 }
 
 func main() {
@@ -255,16 +302,17 @@ func main() {
 
 	apiCfg := apiConfig{
 		dbQueries: dbQueries,
+        db:        db,
 		platform:  platform,
 	}
 
 	mux := http.NewServeMux()
 
 	// Wrap fileserver with metrics middleware
-	fileServer := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
+	fileServer := http.StripPrefix("/app/", http.FileServer(http.Dir("./app")))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fileServer))
 
-	// Health endpoint - only GET
+	// Health endpoint
 	mux.HandleFunc("/api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -275,19 +323,18 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	// Metrics endpoint - only GET (now /admin/metrics)
+	// Metrics endpoint
 	mux.HandleFunc("/admin/metrics", apiCfg.handleMetrics)
 
-	// Reset endpoint - only POST (now /admin/reset)
+	// Reset endpoint
 	mux.HandleFunc("/admin/reset", apiCfg.handleReset)
 
-	// New user creation endpoint
+	// User endpoints
 	mux.HandleFunc("/api/users", apiCfg.handleCreateUser)
+	mux.HandleFunc("/api/login", apiCfg.handleLogin)
 
-	// New chirp creation endpoint (replaces /api/validate_chirp)
+	// Chirp endpoints
 	mux.HandleFunc("/api/chirps", apiCfg.handleChirps)
-
-	// New endpoint for single chirp by ID
 	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.handleChirpByID)
 
 	server := &http.Server{
