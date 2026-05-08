@@ -19,8 +19,9 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	// ✅ FIX 1: Create tables with correct schema including default values
 	_, err = db.Exec(`
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
-		DROP TABLE IF EXISTS users;
+		DROP TABLE IF EXISTS refresh_tokens;
 		DROP TABLE IF EXISTS chirps;
+		DROP TABLE IF EXISTS users;		
 		CREATE TABLE users (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			email TEXT NOT NULL,
@@ -35,12 +36,22 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 		);
+		CREATE TABLE refresh_tokens (
+    		token TEXT PRIMARY KEY,
+		    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			expires_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ
+			);
 	`)
 	assert.NoError(t, err)
 
 	cleanup := func() {
-		db.Exec("DELETE FROM users")
+		db.Exec("DELETE FROM refresh_tokens")
 		db.Exec("DELETE FROM chirps")
+		db.Exec("DELETE FROM users")
+		
 	}
 
 	return db, cleanup

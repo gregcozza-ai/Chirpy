@@ -18,7 +18,6 @@ func TestMakeJWT(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotEmpty(t, token)
 
-	// ✅ CORRECTED: Decode and verify the issuer
 	tokenObj, err := jwt.ParseWithClaims(token, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(tokenSecret), nil
 	})
@@ -31,7 +30,6 @@ func TestMakeJWT(t *testing.T) {
 		t.Fatal("invalid token claims")
 	}
 
-	// ✅ Verify the issuer in the decoded payload
 	assert.Equal(t, "chirpy-access", claims.Issuer)
 }
 

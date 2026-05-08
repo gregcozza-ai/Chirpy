@@ -15,7 +15,7 @@ import (
 	"github.com/gregcozza-ai/Chirpy/internal/auth"
 	"github.com/gregcozza-ai/Chirpy/internal/database"
 	"github.com/joho/godotenv"
-    _ "github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
@@ -23,6 +23,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	db             *sql.DB
 	platform       string
+	jwtSecret      string
 }
 
 type User struct {
@@ -40,6 +41,12 @@ type Chirp struct {
 	UserID    uuid.UUID `json:"user_id"`
 }
 
+type loginRequest struct {
+	Password         string `json:"password"`
+	Email            string `json:"email"`
+	ExpiresInSeconds *int   `json:"expires_in_seconds,omitempty"`
+}
+
 func replaceProfanity(s string) string {
 	profaneRegex := regexp.MustCompile(`(?i)\b(kerfuffle|sharbert|fornax)\b`)
 	return profaneRegex.ReplaceAllString(s, "****")
@@ -54,8 +61,29 @@ func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg stri
 func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(payload)
+	// Marshal the payload into JSON bytes first to catch any encoding errors before writing the status code
+	data, err := json.Marshal(payload)
+	if err != nil {
+		// Log the error and return a generic error message
+		fmt.Printf("Error marshaling JSON response: %v\n", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to encode response"})
+		return
+	}
+	// fmt.Print("Encoded JSON response: ", string(data), "\n") // Debug log to verify the JSON output
+	w.Write(data)
 }
+
+/*
+if err := json.NewEncoder(w).Encode(payload); err != nil {
+        // Log the error for debugging purposes, but we cannot change the status code here
+        // as it has already been written by w.WriteHeader(code).
+        // In a real application, you might want to log this error to a dedicated service.
+        fmt.Printf("Error encoding JSON response: %v\n", err)
+    }
+
+	json.NewEncoder(w).Encode(payload)
+}*/
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,39 +131,35 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case "POST":
-		var req struct {
-			Body   string `json:"body"`
-			UserID string `json:"user_id"`
+	if r.Method == "POST" {
+		// Authentication required for POST
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+
+		userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Parse chirp body
+		var chirpData struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&chirpData); err != nil {
 			cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 
-		// Validate body length
-		if len(req.Body) > 140 {
-			cfg.respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-			return
-		}
+		// Apply profanity filter before saving
+		body := replaceProfanity(chirpData.Body)
 
-		// Replace profanity
-		cleanedBody := replaceProfanity(req.Body)
-
-		// Generate UUID before inserting
-		//id := uuid.New()
-
-		// Convert user_id string to UUID
-		userID, err := uuid.Parse(req.UserID)
-		if err != nil {
-			cfg.respondWithError(w, http.StatusBadRequest, "Invalid user_id format")
-			return
-		}
-
-		// Create chirp in database
-		dbChirp, err := cfg.dbQueries.CreateChirp(context.Background(), database.CreateChirpParams{
-			Body:   cleanedBody,
+		// Create chirp with authenticated user ID
+		chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+			Body:   body,
 			UserID: userID,
 		})
 		if err != nil {
@@ -143,16 +167,20 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Return 201 Created with full chirp
-		chirp := Chirp{
-			ID:        dbChirp.ID,
-			CreatedAt: dbChirp.CreatedAt,
-			UpdatedAt: dbChirp.UpdatedAt,
-			Body:      dbChirp.Body,
-			UserID:    dbChirp.UserID,
+		// Convert to response format
+		response := Chirp{
+			ID:        chirp.ID,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
 		}
-		cfg.respondWithJSON(w, http.StatusCreated, chirp)
 
+		cfg.respondWithJSON(w, http.StatusCreated, response)
+		return
+	}
+
+	switch r.Method {
 	case "GET":
 		dbChirps, err := cfg.dbQueries.GetChirps(context.Background())
 		if err != nil {
@@ -173,7 +201,7 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Return 200 OK with chirps array
-		cfg.respondWithJSON(w, http.StatusOK, chirps)
+		cfg.respondWithJSON(w, http.StatusCreated, chirps)
 
 	default:
 		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -188,21 +216,64 @@ func (cfg *apiConfig) handleChirpByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dbChirp, err := cfg.dbQueries.GetChirpByID(context.Background(), id)
-	if err != nil {
-		cfg.respondWithError(w, http.StatusNotFound, "Chirp not found")
-		return
-	}
+	switch r.Method {
+	case "GET":
+		// Existing GET logic
+		dbChirp, err := cfg.dbQueries.GetChirpByID(context.Background(), id)
+		if err != nil {
+			cfg.respondWithError(w, http.StatusNotFound, "Chirp not found")
+			return
+		}
 
-	chirp := Chirp{
-		ID:        dbChirp.ID,
-		CreatedAt: dbChirp.CreatedAt,
-		UpdatedAt: dbChirp.UpdatedAt,
-		Body:      dbChirp.Body,
-		UserID:    dbChirp.UserID,
-	}
+		chirp := Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		}
 
-	cfg.respondWithJSON(w, http.StatusOK, chirp)
+		cfg.respondWithJSON(w, http.StatusOK, chirp)
+
+	case "DELETE":
+		// DELETE logic
+		dbChirp, err := cfg.dbQueries.GetChirpByID(context.Background(), id)
+		if err != nil {
+			cfg.respondWithError(w, http.StatusNotFound, "Chirp not found")
+			return
+		}
+
+		// Authenticate user
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			cfg.respondWithError(w, http.StatusUnauthorized, "Missing token")
+			return
+		}
+		userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+		if err != nil {
+			cfg.respondWithError(w, http.StatusUnauthorized, "Invalid token")
+			return
+		}
+
+		// Check if user is the author
+		if dbChirp.UserID != userID {
+			cfg.respondWithError(w, http.StatusForbidden, "Not authorized to delete this chirp")
+			return
+		}
+
+		// Delete the chirp
+		err = cfg.dbQueries.DeleteChirp(context.Background(), id)
+		if err != nil {
+			cfg.respondWithError(w, http.StatusInternalServerError, "Failed to delete chirp")
+			return
+		}
+
+		// Return 204 No Content
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
 }
 
 func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +297,7 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
 		return
 	}
-        
+
 	// Generate UUID before inserting
 	id := uuid.New()
 
@@ -254,17 +325,25 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
-	}
+	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
+	// Set default expiration to 1 hour (3600 seconds)
+	expiresIn := 3600 * time.Second
+	if req.ExpiresInSeconds != nil {
+		// Clamp to max 1 hour
+		if *req.ExpiresInSeconds > 3600 {
+			expiresIn = 3600 * time.Second
+		} else {
+			expiresIn = time.Duration(*req.ExpiresInSeconds) * time.Second
+		}
+	}
+
 	// Get user by email
-	dbUser, err := cfg.dbQueries.GetUserByEmail(context.Background(), req.Email)
+	dbUser, err := cfg.dbQueries.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
 		return
@@ -277,15 +356,186 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return user without password
-	user := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
+	// Create JWT token
+	token, err := auth.MakeJWT(dbUser.ID, cfg.jwtSecret, expiresIn)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create token")
+		return
 	}
 
+	// Generate and store refresh token
+	refreshToken := auth.MakeRefreshToken()
+	expiresAt := time.Now().Add(60 * 24 * time.Hour) // 60 days
+
+	_, err = cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    dbUser.ID,
+		ExpiresAt: expiresAt,
+		RevokedAt: sql.NullTime{},
+	})
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create refresh token")
+		return
+	}
+
+	// Add refresh_token to response
+	response := struct {
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
+	}{
+		ID:           dbUser.ID,
+		CreatedAt:    dbUser.CreatedAt,
+		UpdatedAt:    dbUser.UpdatedAt,
+		Email:        dbUser.Email,
+		Token:        token,
+		RefreshToken: refreshToken,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+
+	// fmt.Printf("Received refresh request with token: %s\n", token)
+
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Missing refresh token")
+		return
+	}
+
+	refreshToken, err := cfg.dbQueries.GetRefreshTokenByToken(r.Context(), token)
+
+	if err != nil || refreshToken.RevokedAt.Valid || refreshToken.ExpiresAt.Before(time.Now()) {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Invalid refresh token")
+		return
+	}
+
+	newToken, err := generateToken(cfg, &refreshToken)
+	// fmt.Printf("Generated new token: %s\n", newToken)
+
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to create new token")
+		return
+	}
+
+	cfg.respondWithJSON(w, http.StatusOK, struct {
+		Token string `json:"token"`
+	}{Token: newToken})
+}
+
+func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Missing refresh token")
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(r.Context(), token)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to revoke token")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func generateToken(cfg *apiConfig, refreshToken *database.RefreshToken) (string, error) {
+	// FIX: Pass refreshToken.UserID (value) instead of &refreshToken (pointer)
+	token, err := auth.MakeJWT(refreshToken.UserID, cfg.jwtSecret, 1*time.Hour)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (cfg *apiConfig) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "PUT" {
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Authenticate user via token
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Missing token")
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Invalid token")
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	// Hash new password
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+		return
+	}
+
+	// Update user in database
+	err = cfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email:          req.Email,
+		HashedPassword: hashedPassword,
+		ID:             userID,
+	})
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to update user")
+		return
+	}
+
+	// Fetch updated user
+	updatedUser, err := cfg.dbQueries.GetUserByID(r.Context(), userID)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to fetch updated user")
+		return
+	}
+
+	// Respond with updated user (without password)
+	user := User{
+		ID:        updatedUser.ID,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+		Email:     updatedUser.Email,
+	}
 	cfg.respondWithJSON(w, http.StatusOK, user)
+}
+
+func (cfg *apiConfig) handleUser(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		cfg.handleCreateUser(w, r)
+	case "PUT":
+		cfg.handleUpdateUser(w, r)
+	default:
+		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
 }
 
 func main() {
@@ -302,8 +552,13 @@ func main() {
 
 	apiCfg := apiConfig{
 		dbQueries: dbQueries,
-        db:        db,
+		db:        db,
 		platform:  platform,
+		jwtSecret: os.Getenv("JWT_SECRET"),
+	}
+
+	if apiCfg.jwtSecret == "" {
+		panic("JWT_SECRET environment variable is not set")
 	}
 
 	mux := http.NewServeMux()
@@ -330,12 +585,16 @@ func main() {
 	mux.HandleFunc("/admin/reset", apiCfg.handleReset)
 
 	// User endpoints
-	mux.HandleFunc("/api/users", apiCfg.handleCreateUser)
+	mux.HandleFunc("/api/users", apiCfg.handleUser) // Single handler for both methods
 	mux.HandleFunc("/api/login", apiCfg.handleLogin)
 
 	// Chirp endpoints
 	mux.HandleFunc("/api/chirps", apiCfg.handleChirps)
-	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.handleChirpByID)
+	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.handleChirpByID) // Handles both GET and DELETE
+
+	// Refresh endpoint
+	mux.HandleFunc("/api/refresh", apiCfg.handleRefresh)
+	mux.HandleFunc("/api/revoke", apiCfg.handleRevoke)
 
 	server := &http.Server{
 		Addr:    ":8080",
