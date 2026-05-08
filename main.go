@@ -27,10 +27,11 @@ type apiConfig struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -378,12 +379,13 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add refresh_token to response
+	// Add refresh_token to response (now includes is_chirpy_red)
 	response := struct {
 		ID           uuid.UUID `json:"id"`
 		CreatedAt    time.Time `json:"created_at"`
 		UpdatedAt    time.Time `json:"updated_at"`
 		Email        string    `json:"email"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
 	}{
@@ -391,6 +393,7 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    dbUser.CreatedAt,
 		UpdatedAt:    dbUser.UpdatedAt,
 		Email:        dbUser.Email,
+		IsChirpyRed:  dbUser.IsChirpyRed, // Added this field
 		Token:        token,
 		RefreshToken: refreshToken,
 	}
@@ -596,9 +599,50 @@ func main() {
 	mux.HandleFunc("/api/refresh", apiCfg.handleRefresh)
 	mux.HandleFunc("/api/revoke", apiCfg.handleRevoke)
 
+	// Polka webhook endpoint
+	mux.HandleFunc("/api/polka/webhooks", apiCfg.handlePolkaWebhook)
+
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
 	}
 	server.ListenAndServe()
+}
+
+func (cfg *apiConfig) handlePolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	if payload.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	userID, err := uuid.Parse(payload.Data.UserID)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Invalid user ID format")
+		return
+	}
+
+	rowsAffected, err := cfg.dbQueries.UpgradeUserToChirpyRed(r.Context(), userID)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Failed to upgrade user")
+		return
+	}
+
+	if rowsAffected == 0 {
+		cfg.respondWithError(w, http.StatusNotFound, "User not found")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

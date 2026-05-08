@@ -23,35 +23,36 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	db, err := sql.Open("postgres", "postgres://hanibal@localhost/chirpy_test?sslmode=disable")
 	assert.NoError(t, err)
 
-	// CREATE REQUIRED TABLES (ADD THIS SECTION)
+	// ✅ FIX: Updated users table schema to include is_chirpy_red
 	_, err = db.Exec(`
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-    DROP TABLE IF EXISTS refresh_tokens;
-    DROP TABLE IF EXISTS chirps;
-    DROP TABLE IF EXISTS users;        
-    CREATE TABLE IF NOT EXISTS users (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        email TEXT NOT NULL,
-        hashed_password TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS refresh_tokens (
-        token TEXT PRIMARY KEY,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        expires_at TIMESTAMPTZ NOT NULL,
-        revoked_at TIMESTAMPTZ
-    );
-    CREATE TABLE IF NOT EXISTS chirps (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        body TEXT NOT NULL,
-        user_id UUID NOT NULL REFERENCES users(id),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-`)
+        CREATE EXTENSION IF NOT EXISTS pgcrypto;
+        DROP TABLE IF EXISTS refresh_tokens;
+        DROP TABLE IF EXISTS chirps;
+        DROP TABLE IF EXISTS users;        
+        CREATE TABLE IF NOT EXISTS users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            email TEXT NOT NULL,
+            hashed_password TEXT NOT NULL,
+            is_chirpy_red BOOLEAN NOT NULL DEFAULT false,  -- ADDED COLUMN
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+            token TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at TIMESTAMPTZ NOT NULL,
+            revoked_at TIMESTAMPTZ
+        );
+        CREATE TABLE IF NOT EXISTS chirps (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            body TEXT NOT NULL,
+            user_id UUID NOT NULL REFERENCES users(id),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    `)
 	assert.NoError(t, err)
 
 	// ADD THIS LINE TO SET DATABASE TIME ZONE TO UTC
@@ -283,4 +284,74 @@ func TestGetChirps(t *testing.T) {
 	assert.Len(t, chirps, 1)
 	assert.Equal(t, "Test chirp", chirps[0].Body)
 	assert.Equal(t, userID, chirps[0].UserID)
+}
+
+// TestPolkaWebhook tests the Polka webhook endpoint
+func TestPolkaWebhook(t *testing.T) {
+	apiCfg, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Create test user
+	password := "testpass"
+	hashedPassword, _ := auth.HashPassword(password)
+	_, err := apiCfg.db.Exec("INSERT INTO users (email, hashed_password) VALUES ($1, $2)",
+		"test@example.com", hashedPassword)
+	assert.NoError(t, err)
+
+	// Get user ID
+	var userID uuid.UUID
+	err = apiCfg.db.QueryRow("SELECT id FROM users WHERE email = $1", "test@example.com").Scan(&userID)
+	assert.NoError(t, err)
+
+	// Test valid webhook
+	validPayload := map[string]interface{}{
+		"event": "user.upgraded",
+		"data": map[string]interface{}{
+			"user_id": userID.String(),
+		},
+	}
+	jsonData, _ := json.Marshal(validPayload)
+	req, _ := http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+
+	rr := httptest.NewRecorder()
+	apiCfg.handlePolkaWebhook(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Verify user is now a Chirpy Red member
+	var isChirpyRed bool
+	err = apiCfg.db.QueryRow("SELECT is_chirpy_red FROM users WHERE id = $1", userID).Scan(&isChirpyRed)
+	assert.NoError(t, err)
+	assert.True(t, isChirpyRed)
+
+	// Test invalid event
+	invalidPayload := map[string]interface{}{
+		"event": "user.downgraded",
+		"data": map[string]interface{}{
+			"user_id": userID.String(),
+		},
+	}
+	jsonData, _ = json.Marshal(invalidPayload)
+	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+
+	rr = httptest.NewRecorder()
+	apiCfg.handlePolkaWebhook(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Test user not found
+	nonExistentUserID := uuid.New()
+	invalidUserPayload := map[string]interface{}{
+		"event": "user.upgraded",
+		"data": map[string]interface{}{
+			"user_id": nonExistentUserID.String(),
+		},
+	}
+	jsonData, _ = json.Marshal(invalidUserPayload)
+	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+
+	rr = httptest.NewRecorder()
+	apiCfg.handlePolkaWebhook(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
 }

@@ -16,16 +16,17 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	db, err := sql.Open("postgres", "postgres://hanibal@localhost:5432/chirpy_test?sslmode=disable")
 	assert.NoError(t, err)
 
-	// ✅ FIX 1: Create tables with correct schema including default values
+	// ✅ FIX: Updated users table schema to include is_chirpy_red
 	_, err = db.Exec(`
 		CREATE EXTENSION IF NOT EXISTS pgcrypto;
 		DROP TABLE IF EXISTS refresh_tokens;
 		DROP TABLE IF EXISTS chirps;
-		DROP TABLE IF EXISTS users;		
+		DROP TABLE IF EXISTS users;        
 		CREATE TABLE users (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			email TEXT NOT NULL,
 			hashed_password TEXT NOT NULL,
+			is_chirpy_red BOOLEAN NOT NULL DEFAULT false,  -- ADDED COLUMN
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 		);
@@ -37,13 +38,13 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 		);
 		CREATE TABLE refresh_tokens (
-    		token TEXT PRIMARY KEY,
-		    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			token TEXT PRIMARY KEY,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			expires_at TIMESTAMPTZ NOT NULL,
 			revoked_at TIMESTAMPTZ
-			);
+		);
 	`)
 	assert.NoError(t, err)
 
@@ -51,7 +52,6 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		db.Exec("DELETE FROM refresh_tokens")
 		db.Exec("DELETE FROM chirps")
 		db.Exec("DELETE FROM users")
-		
 	}
 
 	return db, cleanup

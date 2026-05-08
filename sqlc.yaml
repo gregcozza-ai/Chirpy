@@ -3,6 +3,8 @@ sql:
   - schema: "sql/schema"
     queries: "sql/queries"
     engine: "postgresql"
+    database:
+      uri: "postgresql://hanibal@localhost:5432/chirpy?sslmode=disable"
     gen:
       go:
         out: "internal/database"
