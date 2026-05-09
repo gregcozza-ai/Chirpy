@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sync/atomic"
 	"time"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/gregcozza-ai/Chirpy/internal/auth"
@@ -24,6 +25,7 @@ type apiConfig struct {
 	db             *sql.DB
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 type User struct {
@@ -183,10 +185,75 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		dbChirps, err := cfg.dbQueries.GetChirps(context.Background())
-		if err != nil {
-			cfg.respondWithError(w, http.StatusInternalServerError, "Failed to fetch chirps")
-			return
+		// Get author_id from query parameters
+		authorID := r.URL.Query().Get("author_id")
+
+		var dbChirps []database.Chirp
+		var err error
+
+		// Declare separate variables for each database method
+		var authorRows []database.GetChirpsByAuthorRow
+		var allRows []database.GetChirpsRow
+
+		// Filter by author_id if provided
+		if authorID != "" {
+			// Parse string to UUID
+			uuidAuthor, err := uuid.Parse(authorID)
+			if err != nil {
+				cfg.respondWithError(w, http.StatusBadRequest, "Invalid author_id format")
+				return
+			}
+
+			// Get chirps by author (returns []GetChirpsByAuthorRow)
+			authorRows, err = cfg.dbQueries.GetChirpsByAuthor(context.Background(), uuidAuthor)
+			if err != nil {
+				cfg.respondWithError(w, http.StatusInternalServerError, "Failed to fetch chirps")
+				return
+			}
+
+			// Convert rows to []database.Chirp
+			dbChirps = make([]database.Chirp, len(authorRows))
+			for i, row := range authorRows {
+				dbChirps[i] = database.Chirp{
+					ID:        row.ID,
+					CreatedAt: row.CreatedAt,
+					UpdatedAt: row.UpdatedAt,
+					Body:      row.Body,
+					UserID:    row.UserID,
+				}
+			}
+		} else {
+			// Get all chirps (returns []GetChirpsRow)
+			allRows, err = cfg.dbQueries.GetChirps(context.Background())
+			if err != nil {
+				cfg.respondWithError(w, http.StatusInternalServerError, "Failed to fetch chirps")
+				return
+			}
+
+			// Convert rows to []database.Chirp
+			dbChirps = make([]database.Chirp, len(allRows))
+			for i, row := range allRows {
+				dbChirps[i] = database.Chirp{
+					ID:        row.ID,
+					CreatedAt: row.CreatedAt,
+					UpdatedAt: row.UpdatedAt,
+					Body:      row.Body,
+					UserID:    row.UserID,
+				}
+			}
+		}
+
+		// Sort chirps based on 'sort' query parameter
+		sortParam := r.URL.Query().Get("sort")
+		if sortParam == "desc" {
+			sort.Slice(dbChirps, func(i, j int) bool {
+				return dbChirps[i].CreatedAt.After(dbChirps[j].CreatedAt)
+			})
+		} else {
+			// Default to ascending order
+			sort.Slice(dbChirps, func(i, j int) bool {
+				return dbChirps[i].CreatedAt.Before(dbChirps[j].CreatedAt)
+			})
 		}
 
 		// Convert to Chirp array
@@ -202,7 +269,7 @@ func (cfg *apiConfig) handleChirps(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Return 200 OK with chirps array
-		cfg.respondWithJSON(w, http.StatusCreated, chirps)
+		cfg.respondWithJSON(w, http.StatusOK, chirps)
 
 	default:
 		cfg.respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -287,6 +354,7 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Email    string `json:"email"`
 	}
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		cfg.respondWithError(w, http.StatusBadRequest, "Invalid JSON")
 		return
@@ -558,6 +626,7 @@ func main() {
 		db:        db,
 		platform:  platform,
 		jwtSecret: os.Getenv("JWT_SECRET"),
+		polkaKey:  os.Getenv("POLKA_KEY"),
 	}
 
 	if apiCfg.jwtSecret == "" {
@@ -610,6 +679,13 @@ func main() {
 }
 
 func (cfg *apiConfig) handlePolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	// Validate API key
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil || apiKey != cfg.polkaKey {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Invalid API key")
+		return
+	}
+
 	var payload struct {
 		Event string `json:"event"`
 		Data  struct {

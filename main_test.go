@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 	"time"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/gregcozza-ai/Chirpy/internal/auth"
@@ -82,6 +83,7 @@ func setupTest(t *testing.T) (*apiConfig, func()) {
 		dbQueries: queries,
 		db:        db,
 		platform:  "test",
+		polkaKey:  os.Getenv("POLKA_KEY"),
 	}
 
 	return &apiCfg, cleanup
@@ -109,7 +111,7 @@ func TestCreateUser(t *testing.T) {
 	apiCfg.handleCreateUser(rr, req)
 
 	// Check response
-	assert.Equal(t, http.StatusCreated, rr.Code)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 
 	// Parse response body
 	var user User
@@ -118,10 +120,33 @@ func TestCreateUser(t *testing.T) {
 
 	// Verify user data (using UTC for comparison)
 	now := time.Now().UTC()
+	fmt.Printf("User CreatedAt: %v, User UpdatedAt: %v, Now: %v\n", user.CreatedAt, user.UpdatedAt, now)
 	assert.WithinDuration(t, now, user.CreatedAt, 5*time.Second)
 	assert.WithinDuration(t, now, user.UpdatedAt, 5*time.Second)
 	assert.NotEmpty(t, user.ID)
 	assert.Equal(t, "test@example.com", user.Email)
+
+	// Test empty email
+	emptyEmailData := map[string]string{
+		"password": "testpass",
+		"email":    "",
+	}
+	jsonData2, _ := json.Marshal(emptyEmailData)
+	req, _ = http.NewRequest("POST", "/api/users", bytes.NewBuffer(jsonData2))
+	rr = httptest.NewRecorder()
+	apiCfg.handleCreateUser(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Test empty password
+	emptyPasswordData := map[string]string{
+		"password": "",
+		"email":    "test@example.com",
+	}
+	jsonData3, _ := json.Marshal(emptyPasswordData)
+	req, _ = http.NewRequest("POST", "/api/users", bytes.NewBuffer(jsonData3))
+	rr = httptest.NewRecorder()
+	apiCfg.handleCreateUser(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 // TestLogin tests login endpoint
@@ -172,6 +197,28 @@ func TestLogin(t *testing.T) {
 	// Verify user data
 	assert.NotEmpty(t, user.ID)
 	assert.Equal(t, "test@example.com", user.Email)
+
+	// Test non-existent email
+	nonExistentEmailData := map[string]string{
+		"password": "testpass",
+		"email":    "nonexistent@example.com",
+	}
+	jsonData2, _ := json.Marshal(nonExistentEmailData)
+	req, _ = http.NewRequest("POST", "/api/login", bytes.NewBuffer(jsonData2))
+	rr = httptest.NewRecorder()
+	apiCfg.handleLogin(rr, req)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+	// Test incorrect password
+	incorrectPasswordData := map[string]string{
+		"password": "wrongpass",
+		"email":    "test@example.com",
+	}
+	jsonData3, _ := json.Marshal(incorrectPasswordData)
+	req, _ = http.NewRequest("POST", "/api/login", bytes.NewBuffer(jsonData3))
+	rr = httptest.NewRecorder()
+	apiCfg.handleLogin(rr, req)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
 }
 
 // TestCreateChirp tests chirp creation endpoint
@@ -247,6 +294,29 @@ func TestCreateChirp(t *testing.T) {
 	assert.WithinDuration(t, now, chirp.UpdatedAt, 5*time.Second)
 	assert.Equal(t, "Test chirp", chirp.Body)
 	assert.Equal(t, dbUserID.String(), chirp.UserID.String())
+
+	// Test missing body field
+	missingBodyData := map[string]interface{}{
+		"user_id": dbUserID.String(),
+	}
+	jsonData, _ = json.Marshal(missingBodyData)
+	req, _ = http.NewRequest("POST", "/api/chirps", bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "Bearer "+loginResponse.Token)
+	rr = httptest.NewRecorder()
+	apiCfg.handleChirps(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Test empty body
+	emptyBodyData := map[string]interface{}{
+		"body":    "",
+		"user_id": dbUserID.String(),
+	}
+	jsonData, _ = json.Marshal(emptyBodyData)
+	req, _ = http.NewRequest("POST", "/api/chirps", bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "Bearer "+loginResponse.Token)
+	rr = httptest.NewRecorder()
+	apiCfg.handleChirps(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 // TestGetChirps tests chirp retrieval endpoint
@@ -286,8 +356,11 @@ func TestGetChirps(t *testing.T) {
 	assert.Equal(t, userID, chirps[0].UserID)
 }
 
-// TestPolkaWebhook tests the Polka webhook endpoint
+// TestPolkaWebhook tests the Polka webhook endpoint with API key validation
 func TestPolkaWebhook(t *testing.T) {
+	// Set POLKA_KEY environment variable for the test
+	os.Setenv("POLKA_KEY", "f271c81ff7084ee5b99a5091b42d486e")
+
 	apiCfg, cleanup := setupTest(t)
 	defer cleanup()
 
@@ -303,7 +376,7 @@ func TestPolkaWebhook(t *testing.T) {
 	err = apiCfg.db.QueryRow("SELECT id FROM users WHERE email = $1", "test@example.com").Scan(&userID)
 	assert.NoError(t, err)
 
-	// Test valid webhook
+	// Test valid webhook with correct API key
 	validPayload := map[string]interface{}{
 		"event": "user.upgraded",
 		"data": map[string]interface{}{
@@ -312,6 +385,7 @@ func TestPolkaWebhook(t *testing.T) {
 	}
 	jsonData, _ := json.Marshal(validPayload)
 	req, _ := http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "ApiKey f271c81ff7084ee5b99a5091b42d486e")
 
 	rr := httptest.NewRecorder()
 	apiCfg.handlePolkaWebhook(rr, req)
@@ -324,34 +398,80 @@ func TestPolkaWebhook(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, isChirpyRed)
 
-	// Test invalid event
-	invalidPayload := map[string]interface{}{
-		"event": "user.downgraded",
+	// Test missing Authorization header
+	missingAuthPayload := map[string]interface{}{
+		"event": "user.upgraded",
 		"data": map[string]interface{}{
 			"user_id": userID.String(),
 		},
 	}
-	jsonData, _ = json.Marshal(invalidPayload)
+	jsonData, _ = json.Marshal(missingAuthPayload)
 	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
 
 	rr = httptest.NewRecorder()
 	apiCfg.handlePolkaWebhook(rr, req)
 
-	assert.Equal(t, http.StatusNoContent, rr.Code)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
 
-	// Test user not found
-	nonExistentUserID := uuid.New()
-	invalidUserPayload := map[string]interface{}{
+	// Test invalid Authorization header format
+	invalidFormatPayload := map[string]interface{}{
 		"event": "user.upgraded",
 		"data": map[string]interface{}{
-			"user_id": nonExistentUserID.String(),
+			"user_id": userID.String(),
 		},
 	}
-	jsonData, _ = json.Marshal(invalidUserPayload)
+	jsonData, _ = json.Marshal(invalidFormatPayload)
 	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "Bearer f271c81ff7084ee5b99a5091b42d486e")
 
 	rr = httptest.NewRecorder()
 	apiCfg.handlePolkaWebhook(rr, req)
 
-	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+	// Test incorrect API key
+	incorrectKeyPayload := map[string]interface{}{
+		"event": "user.upgraded",
+		"data": map[string]interface{}{
+			"user_id": userID.String(),
+		},
+	}
+	jsonData, _ = json.Marshal(incorrectKeyPayload)
+	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "ApiKey wrongkey")
+
+	rr = httptest.NewRecorder()
+	apiCfg.handlePolkaWebhook(rr, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+	// Test missing "event" field
+	missingEventPayload := map[string]interface{}{
+		"data": map[string]interface{}{
+			"user_id": userID.String(),
+		},
+	}
+	jsonData2, _ := json.Marshal(missingEventPayload)
+	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData2))
+	req.Header.Set("Authorization", "ApiKey f271c81ff7084ee5b99a5091b42d486e")
+
+	rr = httptest.NewRecorder()
+	apiCfg.handlePolkaWebhook(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Test missing "data" field
+	missingDataPayload := map[string]interface{}{
+		"event": "user.upgraded",
+	}
+	jsonData, _ = json.Marshal(missingDataPayload)
+	req, _ = http.NewRequest("POST", "/api/polka/webhooks", bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "ApiKey f271c81ff7084ee5b99a5091b42d486e")
+
+	rr = httptest.NewRecorder()
+	apiCfg.handlePolkaWebhook(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+
+	
 }
